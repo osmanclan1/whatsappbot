@@ -735,7 +735,7 @@ async function runSendMultiple() {
             console.log('='.repeat(50) + '\n');
         }
 
-        askRecipientCount();
+        askMessageCount();
     });
 }
 
