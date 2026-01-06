@@ -285,23 +285,44 @@ async function runSendMultiple() {
     console.log('📱 WhatsApp Message Sender\n');
 
     return new Promise((resolve) => {
-        let isMultiple = false;
+        let isMultipleMessages = false; // Multiple different messages
+        let isMultipleRecipients = false; // Multiple recipients for same message
         let isRecurring = false;
         let cronExpr = null;
         let scheduleName = '';
         let sendAt = null; // For one-time scheduled messages
+        let messages = []; // Array to store multiple messages
 
-        // Step 1: Ask if single or multiple recipients
+        // Step 1: Ask if single message or multiple messages
+        function askMessageCount() {
+            console.log('How many messages do you want to send?');
+            console.log('1. Single message');
+            console.log('2. Multiple messages (different messages)');
+            rl.question('\nEnter choice (1 or 2): ', (choice) => {
+                if (choice === '1') {
+                    isMultipleMessages = false;
+                    askRecipientCount();
+                } else if (choice === '2') {
+                    isMultipleMessages = true;
+                    collectMultipleMessages();
+                } else {
+                    console.log('❌ Invalid choice. Please enter 1 or 2.');
+                    askMessageCount();
+                }
+            });
+        }
+
+        // Step 2: Ask if single or multiple recipients (for single message mode)
         function askRecipientCount() {
-            console.log('How many recipients?');
+            console.log('\nHow many recipients for this message?');
             console.log('1. Single recipient');
             console.log('2. Multiple recipients');
             rl.question('\nEnter choice (1 or 2): ', (choice) => {
                 if (choice === '1') {
-                    isMultiple = false;
+                    isMultipleRecipients = false;
                     askRecurringOption();
                 } else if (choice === '2') {
-                    isMultiple = true;
+                    isMultipleRecipients = true;
                     askRecurringOption();
                 } else {
                     console.log('❌ Invalid choice. Please enter 1 or 2.');
@@ -512,9 +533,9 @@ async function runSendMultiple() {
             });
         }
 
-        // Step 4: Collect phone numbers
+        // Step 4: Collect phone numbers (for single message mode)
         function collectNumbers() {
-            if (isMultiple) {
+            if (isMultipleRecipients) {
                 console.log('\n📞 Enter phone numbers (one per line).');
                 console.log('Format: countrycode+number (e.g., 15551234567)');
                 console.log('Type "done" when finished entering numbers.\n');
@@ -526,12 +547,12 @@ async function runSendMultiple() {
             const numbers = [];
 
             function askNumber() {
-                const prompt = isMultiple 
+                const prompt = isMultipleRecipients 
                     ? 'Phone number (or "done" to finish): '
                     : 'Phone number: ';
                     
                 rl.question(prompt, (input) => {
-                    if (isMultiple && input.toLowerCase() === 'done') {
+                    if (isMultipleRecipients && input.toLowerCase() === 'done') {
                         if (numbers.length === 0) {
                             console.log('❌ No numbers entered. Exiting.');
                             rl.close();
@@ -539,7 +560,7 @@ async function runSendMultiple() {
                             return;
                         }
                         collectMessage(numbers);
-                    } else if (!isMultiple && numbers.length === 0) {
+                    } else if (!isMultipleRecipients && numbers.length === 0) {
                         // Single recipient - just get one number
                         let number = input.trim().replace(/[^0-9@]/g, '');
                         if (number.length > 0) {
@@ -600,7 +621,10 @@ async function runSendMultiple() {
         }
 
         // Save recurring schedule to file
-        async function saveRecurringSchedule(numbers, message) {
+        async function saveRecurringSchedule(numbers, message, cronOverride = null, scheduleNameOverride = '') {
+            // Use provided values or fall back to stored values
+            const finalCron = cronOverride || cronExpr || '0 * * * *';
+            const finalScheduleName = scheduleNameOverride || scheduleName || 'custom';
             try {
                 const schedulesFile = path.join(__dirname, 'schedules.json');
                 let schedules = [];
@@ -612,12 +636,12 @@ async function runSendMultiple() {
                 }
 
                 // Create new schedule
-                const scheduleId = `${scheduleName}-${Date.now()}`;
+                const scheduleId = `${finalScheduleName}-${Date.now()}`;
                 const newSchedule = {
                     id: scheduleId,
                     recipients: numbers,
                     message: message,
-                    cron: cronExpr,
+                    cron: finalCron,
                     enabled: true,
                     timezone: config.timezone || 'America/New_York'
                 };
@@ -630,7 +654,7 @@ async function runSendMultiple() {
                 console.log('\n✅ Recurring schedule saved successfully!');
                 console.log(`   Schedule ID: ${scheduleId}`);
                 console.log(`   Recipients: ${numbers.length}`);
-                console.log(`   Cron: ${cronExpr}`);
+                console.log(`   Cron: ${finalCron}`);
                 console.log(`   Message: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
                 console.log('\n💡 To activate this schedule, restart PM2:');
                 console.log('   pm2 restart whatsapp-bot\n');
@@ -657,7 +681,7 @@ async function runSendMultiple() {
                     id: messageId,
                     recipients: numbers,
                     message: message,
-                    sendAt: sendAt
+                    sendAt: finalSendAt
                 };
 
                 oneTimeMessages.push(newMessage);
@@ -665,7 +689,7 @@ async function runSendMultiple() {
                 // Save to file
                 fs.writeFileSync(oneTimeFile, JSON.stringify(oneTimeMessages, null, 2), 'utf8');
 
-                const sendDate = new Date(sendAt);
+                const sendDate = new Date(finalSendAt);
                 console.log('\n✅ One-time message scheduled successfully!');
                 console.log(`   Message ID: ${messageId}`);
                 console.log(`   Recipients: ${numbers.length}`);
