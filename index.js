@@ -9,6 +9,9 @@ const alertSystem = require('./alerts');
 const backupManager = require('./backup');
 const browserManager = require('./browserManager');
 
+// Check for send-multiple mode
+const isSendMultipleMode = process.argv.includes('--send-multiple');
+
 // Create a new client instance
 const client = new Client({
     authStrategy: new LocalAuth({
@@ -21,10 +24,10 @@ const client = new Client({
 });
 
 // Initialize managers
-const health = new HealthMonitor(client);
-const alerts = new AlertSystem(health);
-const backup = new BackupManager();
-const browserMgr = new BrowserManager(client);
+const health = new healthMonitor(client);
+const alerts = new alertSystem(health);
+const backup = new backupManager();
+const browserMgr = new browserManager(client);
 
 // Keep-alive interval
 let keepAliveInterval = null;
@@ -42,6 +45,14 @@ client.on('qr', (qr) => {
 client.on('ready', async () => {
     logger.connection('WhatsApp client is ready!');
     logger.info('You can now send and receive messages.');
+    
+    // If in send-multiple mode, run that and exit
+    if (isSendMultipleMode) {
+        console.log('\n📱 Running in multi-recipient send mode...\n');
+        await runSendMultiple();
+        await gracefulShutdown('SEND_MULTIPLE_COMPLETE');
+        return;
+    }
     
     // Reset restart attempts on successful connection
     browserMgr.restartAttempts = 0;
@@ -245,6 +256,102 @@ function stopKeepAlive() {
         clearInterval(keepAliveInterval);
         keepAliveInterval = null;
     }
+}
+
+// Multi-recipient sending function
+async function runSendMultiple() {
+    const readline = require('readline');
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+
+    console.log('📱 WhatsApp Multi-Recipient Message Sender\n');
+    console.log('Enter phone numbers (one per line).');
+    console.log('Format: countrycode+number (e.g., 15551234567 or +1-555-123-4567)');
+    console.log('Type "done" when finished entering numbers.\n');
+
+    const numbers = [];
+
+    return new Promise((resolve) => {
+        function collectNumbers() {
+            rl.question('Phone number (or "done" to finish): ', (input) => {
+                if (input.toLowerCase() === 'done') {
+                    if (numbers.length === 0) {
+                        console.log('❌ No numbers entered. Exiting.');
+                        rl.close();
+                        resolve();
+                        return;
+                    }
+                    collectMessage();
+                } else {
+                    let number = input.trim().replace(/[^0-9@]/g, '');
+                    if (number.length > 0) {
+                        if (!number.includes('@c.us')) {
+                            number = number + '@c.us';
+                        }
+                        numbers.push(number);
+                        const displayNum = number.replace('@c.us', '');
+                        console.log(`✅ Added: ${displayNum} (${numbers.length} total)`);
+                    } else {
+                        console.log('❌ Invalid number format. Try again.');
+                    }
+                    collectNumbers();
+                }
+            });
+        }
+
+        function collectMessage() {
+            console.log(`\n📝 You have ${numbers.length} recipient(s).`);
+            rl.question('Enter your message: ', async (msg) => {
+                if (!msg.trim()) {
+                    console.log('❌ Message cannot be empty. Try again.');
+                    collectMessage();
+                    return;
+                }
+
+                console.log('\n📤 Sending messages...\n');
+                await sendToMultiple(numbers, msg.trim());
+                rl.close();
+                resolve();
+            });
+        }
+
+        async function sendToMultiple(numbers, message) {
+            let successCount = 0;
+            let failCount = 0;
+
+            for (let i = 0; i < numbers.length; i++) {
+                const number = numbers[i];
+                const displayNumber = number.replace('@c.us', '');
+                
+                process.stdout.write(`[${i + 1}/${numbers.length}] Sending to ${displayNumber}... `);
+                
+                try {
+                    await sendMessage(number, message);
+                    console.log('✅ Sent');
+                    successCount++;
+                } catch (error) {
+                    console.log(`❌ Failed: ${error.message}`);
+                    failCount++;
+                }
+
+                // Small delay between messages to respect rate limits
+                if (i < numbers.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 3000)); // 3 second delay
+                }
+            }
+
+            console.log('\n' + '='.repeat(50));
+            console.log('📊 Summary:');
+            console.log(`   ✅ Successful: ${successCount}`);
+            console.log(`   ❌ Failed: ${failCount}`);
+            console.log(`   📝 Total: ${numbers.length}`);
+            console.log('='.repeat(50) + '\n');
+        }
+
+        collectNumbers();
+    });
 }
 
 // Initialize browser manager

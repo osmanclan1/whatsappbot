@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "send-multiple": "node send-multiple.js"
+    "send-multiple": "node index.js --send-multiple"
   },
   "keywords": [
     "whatsapp",
