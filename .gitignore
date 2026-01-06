@@ -20,6 +20,7 @@ backups/
 
 # Schedules (optional - you may want to commit this)
 # schedules.json
+# one-time-messages.json
 
 # OS files
 .DS_Store

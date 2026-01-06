@@ -1,5 +1,6 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
 const rateLimiter = require('./rateLimiter');
@@ -8,6 +9,7 @@ const healthMonitor = require('./health');
 const alertSystem = require('./alerts');
 const backupManager = require('./backup');
 const browserManager = require('./browserManager');
+const OneTimeScheduler = require('./one-time-scheduler');
 
 // Check for send-multiple mode
 const isSendMultipleMode = process.argv.includes('--send-multiple');
@@ -66,13 +68,25 @@ client.on('ready', async () => {
     // Start scheduled backups
     backup.startScheduledBackups();
     
-    // Initialize scheduler
+    // Initialize recurring scheduler
     const messageScheduler = new scheduler(sendMessage);
     messageScheduler.start();
     
-    // Store scheduler for cleanup
+    // Initialize one-time scheduler
+    const oneTimeScheduler = new OneTimeScheduler(sendMessage);
+    const oneTimeFile = path.join(__dirname, 'one-time-messages.json');
+    oneTimeScheduler.loadFromFile(oneTimeFile);
+    oneTimeScheduler.start();
+    
+    // Save one-time messages periodically
+    setInterval(() => {
+      oneTimeScheduler.saveToFile(oneTimeFile);
+    }, 60000); // Save every minute
+    
+    // Store schedulers for cleanup
     global.messageScheduler = messageScheduler;
-    logger.info('Scheduler initialized');
+    global.oneTimeScheduler = oneTimeScheduler;
+    logger.info('Schedulers initialized');
     
     // Start keep-alive mechanism
     startKeepAlive();
@@ -268,22 +282,103 @@ async function runSendMultiple() {
         output: process.stdout
     });
 
-    console.log('📱 WhatsApp Multi-Recipient Message Sender\n');
+    console.log('📱 WhatsApp Message Sender\n');
 
     return new Promise((resolve) => {
-        // Step 1: Ask if they want to schedule
-        function askScheduleOption() {
-            console.log('Do you want to schedule this message or send it now?');
-            console.log('1. Send now (immediate)');
-            console.log('2. Schedule for later');
+        let isMultiple = false;
+        let isRecurring = false;
+        let cronExpr = null;
+        let scheduleName = '';
+        let sendAt = null; // For one-time scheduled messages
+
+        // Step 1: Ask if single or multiple recipients
+        function askRecipientCount() {
+            console.log('How many recipients?');
+            console.log('1. Single recipient');
+            console.log('2. Multiple recipients');
             rl.question('\nEnter choice (1 or 2): ', (choice) => {
                 if (choice === '1') {
-                    collectNumbers(false);
+                    isMultiple = false;
+                    askRecurringOption();
                 } else if (choice === '2') {
-                    collectScheduleType();
+                    isMultiple = true;
+                    askRecurringOption();
                 } else {
                     console.log('❌ Invalid choice. Please enter 1 or 2.');
-                    askScheduleOption();
+                    askRecipientCount();
+                }
+            });
+        }
+
+        // Step 2: Ask if recurring or non-recurring
+        function askRecurringOption() {
+            console.log('\nMessage type:');
+            console.log('1. Recurring (repeats on schedule)');
+            console.log('2. Non-recurring (one-time message)');
+            rl.question('\nEnter choice (1 or 2): ', (choice) => {
+                if (choice === '1') {
+                    isRecurring = true;
+                    collectRecurringScheduleType();
+                } else if (choice === '2') {
+                    isRecurring = false;
+                    askNonRecurringOption();
+                } else {
+                    console.log('❌ Invalid choice. Please enter 1 or 2.');
+                    askRecurringOption();
+                }
+            });
+        }
+
+        // Step 3a: For recurring, ask schedule type
+        function collectRecurringScheduleType() {
+            console.log('\n📅 Recurring Schedule Options:');
+            console.log('1. Every hour (at :00)');
+            console.log('2. Every 30 minutes');
+            console.log('3. Every 15 minutes');
+            console.log('4. Daily at specific time (e.g., 9:00 AM)');
+            console.log('5. Custom cron expression');
+            rl.question('\nEnter choice (1-5): ', (choice) => {
+                switch(choice) {
+                    case '1':
+                        cronExpr = '0 * * * *';
+                        scheduleName = 'hourly';
+                        break;
+                    case '2':
+                        cronExpr = '*/30 * * * *';
+                        scheduleName = 'every-30-minutes';
+                        break;
+                    case '3':
+                        cronExpr = '*/15 * * * *';
+                        scheduleName = 'every-15-minutes';
+                        break;
+                    case '4':
+                        collectDailyTime();
+                        return;
+                    case '5':
+                        collectCustomCron();
+                        return;
+                    default:
+                        console.log('❌ Invalid choice. Please enter 1-5.');
+                        collectRecurringScheduleType();
+                        return;
+                }
+                collectNumbers();
+            });
+        }
+
+        // Step 3b: For non-recurring, ask immediate or scheduled
+        function askNonRecurringOption() {
+            console.log('\n📤 Non-Recurring Options:');
+            console.log('1. Send now (immediate)');
+            console.log('2. Schedule for specific date/time');
+            rl.question('\nEnter choice (1 or 2): ', (choice) => {
+                if (choice === '1') {
+                    collectNumbers();
+                } else if (choice === '2') {
+                    collectOneTimeSchedule();
+                } else {
+                    console.log('❌ Invalid choice. Please enter 1 or 2.');
+                    askNonRecurringOption();
                 }
             });
         }
@@ -344,9 +439,9 @@ async function runSendMultiple() {
                     collectDailyTime();
                     return;
                 }
-                const cronExpr = `${minute} ${hour} * * *`;
-                const scheduleName = `daily-${hour.toString().padStart(2, '0')}-${minute.toString().padStart(2, '0')}`;
-                collectNumbers(true, cronExpr, scheduleName);
+                cronExpr = `${minute} ${hour} * * *`;
+                scheduleName = `daily-${hour.toString().padStart(2, '0')}-${minute.toString().padStart(2, '0')}`;
+                collectNumbers();
             });
         }
 
@@ -356,36 +451,109 @@ async function runSendMultiple() {
             console.log('  "0 9 * * *" - Daily at 9:00 AM');
             console.log('  "0 */2 * * *" - Every 2 hours');
             console.log('  "0 9 * * 1-5" - Weekdays at 9:00 AM');
-            rl.question('\nCron expression: ', (cronExpr) => {
+            rl.question('\nCron expression: ', (input) => {
                 const cron = require('node-cron');
-                if (!cron.validate(cronExpr)) {
+                if (!cron.validate(input)) {
                     console.log('❌ Invalid cron expression. Please try again.');
                     collectCustomCron();
                     return;
                 }
-                collectNumbers(true, cronExpr, 'custom');
+                cronExpr = input;
+                scheduleName = 'custom';
+                collectNumbers();
             });
         }
 
-        // Step 3: Collect phone numbers
-        function collectNumbers(isScheduled, cronExpr = null, scheduleName = '') {
-            console.log('\n📞 Enter phone numbers (one per line).');
-            console.log('Format: countrycode+number (e.g., 15551234567)');
-            console.log('Type "done" when finished entering numbers.\n');
+        // Collect one-time schedule (date and time)
+        function collectOneTimeSchedule() {
+            console.log('\n📅 Schedule One-Time Message');
+            console.log('Enter date and time for when to send this message.');
+            rl.question('Date (YYYY-MM-DD, e.g., 2026-01-15): ', (dateInput) => {
+                const dateMatch = dateInput.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+                if (!dateMatch) {
+                    console.log('❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-01-15)');
+                    collectOneTimeSchedule();
+                    return;
+                }
+                const year = parseInt(dateMatch[1]);
+                const month = parseInt(dateMatch[2]) - 1; // JS months are 0-indexed
+                const day = parseInt(dateMatch[3]);
+
+                rl.question('Time (HH:MM, 24-hour, e.g., 14:30 for 2:30 PM): ', (timeInput) => {
+                    const timeMatch = timeInput.match(/^(\d{1,2}):(\d{2})$/);
+                    if (!timeMatch) {
+                        console.log('❌ Invalid time format. Use HH:MM (e.g., 14:30)');
+                        collectOneTimeSchedule();
+                        return;
+                    }
+                    const hour = parseInt(timeMatch[1]);
+                    const minute = parseInt(timeMatch[2]);
+
+                    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                        console.log('❌ Invalid time. Hour must be 0-23, minute must be 0-59.');
+                        collectOneTimeSchedule();
+                        return;
+                    }
+
+                    // Create date object
+                    const sendDate = new Date(year, month, day, hour, minute);
+                    const now = new Date();
+
+                    if (sendDate <= now) {
+                        console.log('❌ That time is in the past. Please choose a future date/time.');
+                        collectOneTimeSchedule();
+                        return;
+                    }
+
+                    sendAt = sendDate.getTime();
+                    console.log(`✅ Scheduled for: ${sendDate.toLocaleString()}`);
+                    collectNumbers();
+                });
+            });
+        }
+
+        // Step 4: Collect phone numbers
+        function collectNumbers() {
+            if (isMultiple) {
+                console.log('\n📞 Enter phone numbers (one per line).');
+                console.log('Format: countrycode+number (e.g., 15551234567)');
+                console.log('Type "done" when finished entering numbers.\n');
+            } else {
+                console.log('\n📞 Enter phone number.');
+                console.log('Format: countrycode+number (e.g., 15551234567)\n');
+            }
 
             const numbers = [];
 
             function askNumber() {
-                rl.question('Phone number (or "done" to finish): ', (input) => {
-                    if (input.toLowerCase() === 'done') {
+                const prompt = isMultiple 
+                    ? 'Phone number (or "done" to finish): '
+                    : 'Phone number: ';
+                    
+                rl.question(prompt, (input) => {
+                    if (isMultiple && input.toLowerCase() === 'done') {
                         if (numbers.length === 0) {
                             console.log('❌ No numbers entered. Exiting.');
                             rl.close();
                             resolve();
                             return;
                         }
-                        collectMessage(isScheduled, numbers, cronExpr, scheduleName);
+                        collectMessage(numbers);
+                    } else if (!isMultiple && numbers.length === 0) {
+                        // Single recipient - just get one number
+                        let number = input.trim().replace(/[^0-9@]/g, '');
+                        if (number.length > 0) {
+                            if (!number.includes('@c.us')) {
+                                number = number + '@c.us';
+                            }
+                            numbers.push(number);
+                            collectMessage(numbers);
+                        } else {
+                            console.log('❌ Invalid number format. Try again.');
+                            askNumber();
+                        }
                     } else {
+                        // Multiple recipients - keep collecting
                         let number = input.trim().replace(/[^0-9@]/g, '');
                         if (number.length > 0) {
                             if (!number.includes('@c.us')) {
@@ -405,19 +573,24 @@ async function runSendMultiple() {
             askNumber();
         }
 
-        // Step 4: Collect message
-        function collectMessage(isScheduled, numbers, cronExpr, scheduleName) {
+        // Step 5: Collect message
+        function collectMessage(numbers) {
             console.log(`\n📝 You have ${numbers.length} recipient(s).`);
             rl.question('Enter your message: ', async (msg) => {
                 if (!msg.trim()) {
                     console.log('❌ Message cannot be empty. Try again.');
-                    collectMessage(isScheduled, numbers, cronExpr, scheduleName);
+                    collectMessage(numbers);
                     return;
                 }
 
-                if (isScheduled) {
-                    await saveSchedule(numbers, msg.trim(), cronExpr, scheduleName);
+                if (isRecurring) {
+                    // Save recurring schedule
+                    await saveRecurringSchedule(numbers, msg.trim());
+                } else if (sendAt) {
+                    // Save one-time scheduled message
+                    await saveOneTimeSchedule(numbers, msg.trim());
                 } else {
+                    // Send immediately
                     console.log('\n📤 Sending messages now...\n');
                     await sendToMultiple(numbers, msg.trim());
                 }
@@ -426,8 +599,8 @@ async function runSendMultiple() {
             });
         }
 
-        // Save schedule to file
-        async function saveSchedule(numbers, message, cronExpr, scheduleName) {
+        // Save recurring schedule to file
+        async function saveRecurringSchedule(numbers, message) {
             try {
                 const schedulesFile = path.join(__dirname, 'schedules.json');
                 let schedules = [];
@@ -454,7 +627,7 @@ async function runSendMultiple() {
                 // Save to file
                 fs.writeFileSync(schedulesFile, JSON.stringify(schedules, null, 2), 'utf8');
 
-                console.log('\n✅ Schedule saved successfully!');
+                console.log('\n✅ Recurring schedule saved successfully!');
                 console.log(`   Schedule ID: ${scheduleId}`);
                 console.log(`   Recipients: ${numbers.length}`);
                 console.log(`   Cron: ${cronExpr}`);
@@ -463,6 +636,45 @@ async function runSendMultiple() {
                 console.log('   pm2 restart whatsapp-bot\n');
             } catch (error) {
                 console.error('❌ Error saving schedule:', error.message);
+            }
+        }
+
+        // Save one-time scheduled message
+        async function saveOneTimeSchedule(numbers, message) {
+            try {
+                const oneTimeFile = path.join(__dirname, 'one-time-messages.json');
+                let oneTimeMessages = [];
+
+                // Load existing one-time messages
+                if (fs.existsSync(oneTimeFile)) {
+                    const data = fs.readFileSync(oneTimeFile, 'utf8');
+                    oneTimeMessages = JSON.parse(data);
+                }
+
+                // Create new one-time message
+                const messageId = `onetime-${Date.now()}`;
+                const newMessage = {
+                    id: messageId,
+                    recipients: numbers,
+                    message: message,
+                    sendAt: sendAt
+                };
+
+                oneTimeMessages.push(newMessage);
+
+                // Save to file
+                fs.writeFileSync(oneTimeFile, JSON.stringify(oneTimeMessages, null, 2), 'utf8');
+
+                const sendDate = new Date(sendAt);
+                console.log('\n✅ One-time message scheduled successfully!');
+                console.log(`   Message ID: ${messageId}`);
+                console.log(`   Recipients: ${numbers.length}`);
+                console.log(`   Scheduled for: ${sendDate.toLocaleString()}`);
+                console.log(`   Message: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
+                console.log('\n💡 To activate this schedule, restart PM2:');
+                console.log('   pm2 restart whatsapp-bot\n');
+            } catch (error) {
+                console.error('❌ Error saving one-time schedule:', error.message);
             }
         }
 
@@ -499,7 +711,7 @@ async function runSendMultiple() {
             console.log('='.repeat(50) + '\n');
         }
 
-        askScheduleOption();
+        askRecipientCount();
     });
 }
 
@@ -517,9 +729,15 @@ async function gracefulShutdown(signal) {
     // Stop keep-alive
     stopKeepAlive();
     
-    // Stop scheduler
+    // Stop schedulers
     if (global.messageScheduler) {
         global.messageScheduler.stop();
+    }
+    if (global.oneTimeScheduler) {
+        global.oneTimeScheduler.stop();
+        // Save before shutdown
+        const oneTimeFile = require('path').join(__dirname, 'one-time-messages.json');
+        global.oneTimeScheduler.saveToFile(oneTimeFile);
     }
     
     // Stop health monitoring
