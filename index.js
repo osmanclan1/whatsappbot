@@ -312,6 +312,371 @@ async function runSendMultiple() {
             });
         }
 
+        // Collect multiple different messages
+        function collectMultipleMessages() {
+            rl.question('\nHow many different messages do you want to send? ', (countInput) => {
+                const count = parseInt(countInput);
+                if (isNaN(count) || count < 1) {
+                    console.log('❌ Invalid number. Please enter a positive integer.');
+                    collectMultipleMessages();
+                    return;
+                }
+
+                console.log(`\n📝 You will collect ${count} message(s).\n`);
+                collectNextMessage(0, count, []);
+            });
+        }
+
+        // Collect next message in the sequence
+        function collectNextMessage(currentIndex, totalCount, collectedMessages) {
+            if (currentIndex >= totalCount) {
+                // All messages collected, now process them
+                processMultipleMessages(collectedMessages);
+                return;
+            }
+
+            console.log(`\n${'='.repeat(50)}`);
+            console.log(`Message ${currentIndex + 1} of ${totalCount}`);
+            console.log('='.repeat(50));
+
+            // Collect message text
+            rl.question('\n📝 Enter message text: ', (messageText) => {
+                if (!messageText.trim()) {
+                    console.log('❌ Message cannot be empty. Try again.');
+                    collectNextMessage(currentIndex, totalCount, collectedMessages);
+                    return;
+                }
+
+                // Collect recipients for this message
+                collectRecipientsForMessage(messageText.trim(), currentIndex, totalCount, collectedMessages);
+            });
+        }
+
+        // Collect recipients for a specific message
+        function collectRecipientsForMessage(messageText, messageIndex, totalCount, collectedMessages) {
+            console.log('\n📞 How many recipients for this message?');
+            console.log('1. Single recipient');
+            console.log('2. Multiple recipients');
+            rl.question('\nEnter choice (1 or 2): ', (choice) => {
+                const isMultiRecip = choice === '2';
+                
+                if (choice !== '1' && choice !== '2') {
+                    console.log('❌ Invalid choice. Please enter 1 or 2.');
+                    collectRecipientsForMessage(messageText, messageIndex, totalCount, collectedMessages);
+                    return;
+                }
+
+                // Collect phone numbers
+                const numbers = [];
+                const prompt = isMultiRecip 
+                    ? '\n📞 Enter phone numbers (one per line, type "done" when finished): '
+                    : '\n📞 Enter phone number: ';
+
+                function askNumberForMessage() {
+                    rl.question(prompt, (input) => {
+                        if (isMultiRecip && input.toLowerCase() === 'done') {
+                            if (numbers.length === 0) {
+                                console.log('❌ No numbers entered. Try again.');
+                                askNumberForMessage();
+                                return;
+                            }
+                            // Ask scheduling option for this message
+                            askSchedulingForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                        } else if (!isMultiRecip && numbers.length === 0) {
+                            let number = input.trim().replace(/[^0-9@]/g, '');
+                            if (number.length > 0) {
+                                if (!number.includes('@c.us')) {
+                                    number = number + '@c.us';
+                                }
+                                numbers.push(number);
+                                askSchedulingForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                            } else {
+                                console.log('❌ Invalid number format. Try again.');
+                                askNumberForMessage();
+                            }
+                        } else {
+                            let number = input.trim().replace(/[^0-9@]/g, '');
+                            if (number.length > 0) {
+                                if (!number.includes('@c.us')) {
+                                    number = number + '@c.us';
+                                }
+                                numbers.push(number);
+                                const displayNum = number.replace('@c.us', '');
+                                console.log(`✅ Added: ${displayNum} (${numbers.length} total)`);
+                            } else {
+                                console.log('❌ Invalid number format. Try again.');
+                            }
+                            askNumberForMessage();
+                        }
+                    });
+                }
+
+                askNumberForMessage();
+            });
+        }
+
+        // Ask scheduling option for a specific message
+        function askSchedulingForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages) {
+            console.log('\n📅 Message type:');
+            console.log('1. Recurring (repeats on schedule)');
+            console.log('2. Non-recurring (one-time message)');
+            console.log('3. Send now (immediate)');
+            rl.question('\nEnter choice (1, 2, or 3): ', (choice) => {
+                if (choice === '1') {
+                    // Recurring - collect schedule
+                    collectRecurringScheduleForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                } else if (choice === '2') {
+                    // One-time scheduled
+                    collectOneTimeScheduleForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                } else if (choice === '3') {
+                    // Immediate - add to collected messages
+                    collectedMessages.push({
+                        message: messageText,
+                        recipients: numbers,
+                        type: 'immediate'
+                    });
+                    collectNextMessage(messageIndex + 1, totalCount, collectedMessages);
+                } else {
+                    console.log('❌ Invalid choice. Please enter 1, 2, or 3.');
+                    askSchedulingForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                }
+            });
+        }
+
+        // Collect recurring schedule for a specific message
+        function collectRecurringScheduleForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages) {
+            console.log('\n📅 Recurring Schedule Options:');
+            console.log('1. Every hour (at :00)');
+            console.log('2. Every 30 minutes');
+            console.log('3. Every 15 minutes');
+            console.log('4. Daily at specific time (e.g., 9:00 AM)');
+            console.log('5. Custom cron expression');
+            rl.question('\nEnter choice (1-5): ', (choice) => {
+                let msgCronExpr = null;
+                let msgScheduleName = '';
+
+                switch(choice) {
+                    case '1':
+                        msgCronExpr = '0 * * * *';
+                        msgScheduleName = 'hourly';
+                        break;
+                    case '2':
+                        msgCronExpr = '*/30 * * * *';
+                        msgScheduleName = 'every-30-minutes';
+                        break;
+                    case '3':
+                        msgCronExpr = '*/15 * * * *';
+                        msgScheduleName = 'every-15-minutes';
+                        break;
+                    case '4':
+                        collectDailyTimeForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                        return;
+                    case '5':
+                        collectCustomCronForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                        return;
+                    default:
+                        console.log('❌ Invalid choice. Please enter 1-5.');
+                        collectRecurringScheduleForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                        return;
+                }
+
+                collectedMessages.push({
+                    message: messageText,
+                    recipients: numbers,
+                    type: 'recurring',
+                    cron: msgCronExpr,
+                    scheduleName: msgScheduleName
+                });
+                collectNextMessage(messageIndex + 1, totalCount, collectedMessages);
+            });
+        }
+
+        // Collect daily time for a specific message
+        function collectDailyTimeForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages) {
+            rl.question('\nEnter time (format: HH:MM, 24-hour, e.g., 09:00 for 9 AM): ', (timeInput) => {
+                const timeMatch = timeInput.match(/^(\d{1,2}):(\d{2})$/);
+                if (!timeMatch) {
+                    console.log('❌ Invalid time format. Use HH:MM (e.g., 09:00)');
+                    collectDailyTimeForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                    return;
+                }
+                const hour = parseInt(timeMatch[1]);
+                const minute = parseInt(timeMatch[2]);
+                if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                    console.log('❌ Invalid time. Hour must be 0-23, minute must be 0-59.');
+                    collectDailyTimeForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                    return;
+                }
+                const msgCronExpr = `${minute} ${hour} * * *`;
+                const msgScheduleName = `daily-${hour.toString().padStart(2, '0')}-${minute.toString().padStart(2, '0')}`;
+                
+                collectedMessages.push({
+                    message: messageText,
+                    recipients: numbers,
+                    type: 'recurring',
+                    cron: msgCronExpr,
+                    scheduleName: msgScheduleName
+                });
+                collectNextMessage(messageIndex + 1, totalCount, collectedMessages);
+            });
+        }
+
+        // Collect custom cron for a specific message
+        function collectCustomCronForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages) {
+            console.log('\nEnter cron expression (format: minute hour day month weekday)');
+            console.log('Examples:');
+            console.log('  "0 9 * * *" - Daily at 9:00 AM');
+            console.log('  "0 */2 * * *" - Every 2 hours');
+            console.log('  "0 9 * * 1-5" - Weekdays at 9:00 AM');
+            rl.question('\nCron expression: ', (input) => {
+                const cron = require('node-cron');
+                if (!cron.validate(input)) {
+                    console.log('❌ Invalid cron expression. Please try again.');
+                    collectCustomCronForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                    return;
+                }
+                
+                collectedMessages.push({
+                    message: messageText,
+                    recipients: numbers,
+                    type: 'recurring',
+                    cron: input,
+                    scheduleName: 'custom'
+                });
+                collectNextMessage(messageIndex + 1, totalCount, collectedMessages);
+            });
+        }
+
+        // Collect one-time schedule for a specific message
+        function collectOneTimeScheduleForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages) {
+            console.log('\n📅 Schedule One-Time Message');
+            console.log('Enter date and time for when to send this message.');
+            rl.question('Date (YYYY-MM-DD, e.g., 2026-01-15): ', (dateInput) => {
+                const dateMatch = dateInput.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+                if (!dateMatch) {
+                    console.log('❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-01-15)');
+                    collectOneTimeScheduleForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                    return;
+                }
+                const year = parseInt(dateMatch[1]);
+                const month = parseInt(dateMatch[2]) - 1; // JS months are 0-indexed
+                const day = parseInt(dateMatch[3]);
+
+                rl.question('Time (HH:MM, 24-hour, e.g., 14:30 for 2:30 PM): ', (timeInput) => {
+                    const timeMatch = timeInput.match(/^(\d{1,2}):(\d{2})$/);
+                    if (!timeMatch) {
+                        console.log('❌ Invalid time format. Use HH:MM (e.g., 14:30)');
+                        collectOneTimeScheduleForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                        return;
+                    }
+                    const hour = parseInt(timeMatch[1]);
+                    const minute = parseInt(timeMatch[2]);
+
+                    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                        console.log('❌ Invalid time. Hour must be 0-23, minute must be 0-59.');
+                        collectOneTimeScheduleForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                        return;
+                    }
+
+                    // Create date object
+                    const sendDate = new Date(year, month, day, hour, minute);
+                    const now = new Date();
+
+                    if (sendDate <= now) {
+                        console.log('❌ That time is in the past. Please choose a future date/time.');
+                        collectOneTimeScheduleForMessage(messageText, numbers, messageIndex, totalCount, collectedMessages);
+                        return;
+                    }
+
+                    const sendAtTime = sendDate.getTime();
+                    console.log(`✅ Scheduled for: ${sendDate.toLocaleString()}`);
+                    
+                    collectedMessages.push({
+                        message: messageText,
+                        recipients: numbers,
+                        type: 'onetime',
+                        sendAt: sendAtTime
+                    });
+                    collectNextMessage(messageIndex + 1, totalCount, collectedMessages);
+                });
+            });
+        }
+
+        // Process all collected messages
+        async function processMultipleMessages(collectedMessages) {
+            console.log('\n' + '='.repeat(50));
+            console.log('📊 Processing all messages...');
+            console.log('='.repeat(50) + '\n');
+
+            let immediateCount = 0;
+            let recurringCount = 0;
+            let onetimeCount = 0;
+
+            for (const msgData of collectedMessages) {
+                if (msgData.type === 'immediate') {
+                    immediateCount++;
+                    console.log(`\n📤 Sending message ${immediateCount} immediately...`);
+                    await sendToMultiple(msgData.recipients, msgData.message);
+                } else if (msgData.type === 'recurring') {
+                    recurringCount++;
+                    await saveRecurringSchedule(
+                        msgData.recipients, 
+                        msgData.message, 
+                        msgData.cron, 
+                        msgData.scheduleName
+                    );
+                } else if (msgData.type === 'onetime') {
+                    onetimeCount++;
+                    await saveOneTimeScheduleForMultiple(msgData.recipients, msgData.message, msgData.sendAt);
+                }
+            }
+
+            console.log('\n' + '='.repeat(50));
+            console.log('✅ All messages processed!');
+            console.log(`   📤 Immediate: ${immediateCount}`);
+            console.log(`   🔄 Recurring: ${recurringCount}`);
+            console.log(`   📅 One-time: ${onetimeCount}`);
+            console.log('='.repeat(50) + '\n');
+
+            if (recurringCount > 0 || onetimeCount > 0) {
+                console.log('💡 To activate scheduled messages, restart PM2:');
+                console.log('   pm2 restart whatsapp-bot\n');
+            }
+        }
+
+        // Save one-time schedule for multiple messages mode
+        async function saveOneTimeScheduleForMultiple(numbers, message, finalSendAt) {
+            try {
+                const oneTimeFile = path.join(__dirname, 'one-time-messages.json');
+                let oneTimeMessages = [];
+
+                // Load existing one-time messages
+                if (fs.existsSync(oneTimeFile)) {
+                    const data = fs.readFileSync(oneTimeFile, 'utf8');
+                    oneTimeMessages = JSON.parse(data);
+                }
+
+                // Create new one-time message
+                const messageId = `onetime-${Date.now()}`;
+                const newMessage = {
+                    id: messageId,
+                    recipients: numbers,
+                    message: message,
+                    sendAt: finalSendAt
+                };
+
+                oneTimeMessages.push(newMessage);
+
+                // Save to file
+                fs.writeFileSync(oneTimeFile, JSON.stringify(oneTimeMessages, null, 2), 'utf8');
+
+                const sendDate = new Date(finalSendAt);
+                console.log(`\n✅ One-time message scheduled: ${sendDate.toLocaleString()}`);
+            } catch (error) {
+                console.error('❌ Error saving one-time schedule:', error.message);
+            }
+        }
+
         // Step 2: Ask if single or multiple recipients (for single message mode)
         function askRecipientCount() {
             console.log('\nHow many recipients for this message?');
@@ -681,7 +1046,7 @@ async function runSendMultiple() {
                     id: messageId,
                     recipients: numbers,
                     message: message,
-                    sendAt: finalSendAt
+                    sendAt: sendAt
                 };
 
                 oneTimeMessages.push(newMessage);
@@ -689,7 +1054,7 @@ async function runSendMultiple() {
                 // Save to file
                 fs.writeFileSync(oneTimeFile, JSON.stringify(oneTimeMessages, null, 2), 'utf8');
 
-                const sendDate = new Date(finalSendAt);
+                const sendDate = new Date(sendAt);
                 console.log('\n✅ One-time message scheduled successfully!');
                 console.log(`   Message ID: ${messageId}`);
                 console.log(`   Recipients: ${numbers.length}`);
