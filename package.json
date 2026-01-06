@@ -4,7 +4,8 @@
   "description": "Simple WhatsApp API project using whatsapp-web.js",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "send-multiple": "node send-multiple.js"
   },
   "keywords": [
     "whatsapp",

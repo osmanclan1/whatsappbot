@@ -299,5 +299,5 @@ process.on('unhandledRejection', (reason, promise) => {
     });
 });
 
-// Export sendMessage function for use in other modules
+// Export sendMessage function and client for use in other modules
 module.exports = { sendMessage, client };
