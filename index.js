@@ -258,65 +258,215 @@ function stopKeepAlive() {
     }
 }
 
-// Multi-recipient sending function
+// Multi-recipient sending function with scheduling support
 async function runSendMultiple() {
     const readline = require('readline');
+    const fs = require('fs');
+    const path = require('path');
     const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout
     });
 
     console.log('📱 WhatsApp Multi-Recipient Message Sender\n');
-    console.log('Enter phone numbers (one per line).');
-    console.log('Format: countrycode+number (e.g., 15551234567 or +1-555-123-4567)');
-    console.log('Type "done" when finished entering numbers.\n');
-
-    const numbers = [];
 
     return new Promise((resolve) => {
-        function collectNumbers() {
-            rl.question('Phone number (or "done" to finish): ', (input) => {
-                if (input.toLowerCase() === 'done') {
-                    if (numbers.length === 0) {
-                        console.log('❌ No numbers entered. Exiting.');
-                        rl.close();
-                        resolve();
-                        return;
-                    }
-                    collectMessage();
+        // Step 1: Ask if they want to schedule
+        function askScheduleOption() {
+            console.log('Do you want to schedule this message or send it now?');
+            console.log('1. Send now (immediate)');
+            console.log('2. Schedule for later');
+            rl.question('\nEnter choice (1 or 2): ', (choice) => {
+                if (choice === '1') {
+                    collectNumbers(false);
+                } else if (choice === '2') {
+                    collectScheduleType();
                 } else {
-                    let number = input.trim().replace(/[^0-9@]/g, '');
-                    if (number.length > 0) {
-                        if (!number.includes('@c.us')) {
-                            number = number + '@c.us';
-                        }
-                        numbers.push(number);
-                        const displayNum = number.replace('@c.us', '');
-                        console.log(`✅ Added: ${displayNum} (${numbers.length} total)`);
-                    } else {
-                        console.log('❌ Invalid number format. Try again.');
-                    }
-                    collectNumbers();
+                    console.log('❌ Invalid choice. Please enter 1 or 2.');
+                    askScheduleOption();
                 }
             });
         }
 
-        function collectMessage() {
+        // Step 2: If scheduling, ask for schedule type
+        function collectScheduleType() {
+            console.log('\n📅 Schedule Options:');
+            console.log('1. Every hour (at :00)');
+            console.log('2. Every 30 minutes');
+            console.log('3. Every 15 minutes');
+            console.log('4. Daily at specific time (e.g., 9:00 AM)');
+            console.log('5. Custom cron expression');
+            rl.question('\nEnter choice (1-5): ', (choice) => {
+                let cronExpr = null;
+                let scheduleName = '';
+
+                switch(choice) {
+                    case '1':
+                        cronExpr = '0 * * * *';
+                        scheduleName = 'hourly';
+                        break;
+                    case '2':
+                        cronExpr = '*/30 * * * *';
+                        scheduleName = 'every-30-minutes';
+                        break;
+                    case '3':
+                        cronExpr = '*/15 * * * *';
+                        scheduleName = 'every-15-minutes';
+                        break;
+                    case '4':
+                        collectDailyTime();
+                        return;
+                    case '5':
+                        collectCustomCron();
+                        return;
+                    default:
+                        console.log('❌ Invalid choice. Please enter 1-5.');
+                        collectScheduleType();
+                        return;
+                }
+
+                collectNumbers(true, cronExpr, scheduleName);
+            });
+        }
+
+        function collectDailyTime() {
+            rl.question('\nEnter time (format: HH:MM, 24-hour, e.g., 09:00 for 9 AM): ', (timeInput) => {
+                const timeMatch = timeInput.match(/^(\d{1,2}):(\d{2})$/);
+                if (!timeMatch) {
+                    console.log('❌ Invalid time format. Use HH:MM (e.g., 09:00)');
+                    collectDailyTime();
+                    return;
+                }
+                const hour = parseInt(timeMatch[1]);
+                const minute = parseInt(timeMatch[2]);
+                if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                    console.log('❌ Invalid time. Hour must be 0-23, minute must be 0-59.');
+                    collectDailyTime();
+                    return;
+                }
+                const cronExpr = `${minute} ${hour} * * *`;
+                const scheduleName = `daily-${hour.toString().padStart(2, '0')}-${minute.toString().padStart(2, '0')}`;
+                collectNumbers(true, cronExpr, scheduleName);
+            });
+        }
+
+        function collectCustomCron() {
+            console.log('\nEnter cron expression (format: minute hour day month weekday)');
+            console.log('Examples:');
+            console.log('  "0 9 * * *" - Daily at 9:00 AM');
+            console.log('  "0 */2 * * *" - Every 2 hours');
+            console.log('  "0 9 * * 1-5" - Weekdays at 9:00 AM');
+            rl.question('\nCron expression: ', (cronExpr) => {
+                const cron = require('node-cron');
+                if (!cron.validate(cronExpr)) {
+                    console.log('❌ Invalid cron expression. Please try again.');
+                    collectCustomCron();
+                    return;
+                }
+                collectNumbers(true, cronExpr, 'custom');
+            });
+        }
+
+        // Step 3: Collect phone numbers
+        function collectNumbers(isScheduled, cronExpr = null, scheduleName = '') {
+            console.log('\n📞 Enter phone numbers (one per line).');
+            console.log('Format: countrycode+number (e.g., 15551234567)');
+            console.log('Type "done" when finished entering numbers.\n');
+
+            const numbers = [];
+
+            function askNumber() {
+                rl.question('Phone number (or "done" to finish): ', (input) => {
+                    if (input.toLowerCase() === 'done') {
+                        if (numbers.length === 0) {
+                            console.log('❌ No numbers entered. Exiting.');
+                            rl.close();
+                            resolve();
+                            return;
+                        }
+                        collectMessage(isScheduled, numbers, cronExpr, scheduleName);
+                    } else {
+                        let number = input.trim().replace(/[^0-9@]/g, '');
+                        if (number.length > 0) {
+                            if (!number.includes('@c.us')) {
+                                number = number + '@c.us';
+                            }
+                            numbers.push(number);
+                            const displayNum = number.replace('@c.us', '');
+                            console.log(`✅ Added: ${displayNum} (${numbers.length} total)`);
+                        } else {
+                            console.log('❌ Invalid number format. Try again.');
+                        }
+                        askNumber();
+                    }
+                });
+            }
+
+            askNumber();
+        }
+
+        // Step 4: Collect message
+        function collectMessage(isScheduled, numbers, cronExpr, scheduleName) {
             console.log(`\n📝 You have ${numbers.length} recipient(s).`);
             rl.question('Enter your message: ', async (msg) => {
                 if (!msg.trim()) {
                     console.log('❌ Message cannot be empty. Try again.');
-                    collectMessage();
+                    collectMessage(isScheduled, numbers, cronExpr, scheduleName);
                     return;
                 }
 
-                console.log('\n📤 Sending messages...\n');
-                await sendToMultiple(numbers, msg.trim());
+                if (isScheduled) {
+                    await saveSchedule(numbers, msg.trim(), cronExpr, scheduleName);
+                } else {
+                    console.log('\n📤 Sending messages now...\n');
+                    await sendToMultiple(numbers, msg.trim());
+                }
                 rl.close();
                 resolve();
             });
         }
 
+        // Save schedule to file
+        async function saveSchedule(numbers, message, cronExpr, scheduleName) {
+            try {
+                const schedulesFile = path.join(__dirname, 'schedules.json');
+                let schedules = [];
+
+                // Load existing schedules
+                if (fs.existsSync(schedulesFile)) {
+                    const data = fs.readFileSync(schedulesFile, 'utf8');
+                    schedules = JSON.parse(data);
+                }
+
+                // Create new schedule
+                const scheduleId = `${scheduleName}-${Date.now()}`;
+                const newSchedule = {
+                    id: scheduleId,
+                    recipients: numbers,
+                    message: message,
+                    cron: cronExpr,
+                    enabled: true,
+                    timezone: config.timezone || 'America/New_York'
+                };
+
+                schedules.push(newSchedule);
+
+                // Save to file
+                fs.writeFileSync(schedulesFile, JSON.stringify(schedules, null, 2), 'utf8');
+
+                console.log('\n✅ Schedule saved successfully!');
+                console.log(`   Schedule ID: ${scheduleId}`);
+                console.log(`   Recipients: ${numbers.length}`);
+                console.log(`   Cron: ${cronExpr}`);
+                console.log(`   Message: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
+                console.log('\n💡 To activate this schedule, restart PM2:');
+                console.log('   pm2 restart whatsapp-bot\n');
+            } catch (error) {
+                console.error('❌ Error saving schedule:', error.message);
+            }
+        }
+
+        // Send immediately
         async function sendToMultiple(numbers, message) {
             let successCount = 0;
             let failCount = 0;
@@ -336,9 +486,8 @@ async function runSendMultiple() {
                     failCount++;
                 }
 
-                // Small delay between messages to respect rate limits
                 if (i < numbers.length - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 3000)); // 3 second delay
+                    await new Promise(resolve => setTimeout(resolve, 3000));
                 }
             }
 
@@ -350,7 +499,7 @@ async function runSendMultiple() {
             console.log('='.repeat(50) + '\n');
         }
 
-        collectNumbers();
+        askScheduleOption();
     });
 }
 

@@ -18,6 +18,9 @@ pm2-*.log
 backups/
 *.tar.gz
 
+# Schedules (optional - you may want to commit this)
+# schedules.json
+
 # OS files
 .DS_Store
 Thumbs.db

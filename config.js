@@ -39,18 +39,22 @@ const config = {
     httpPort: parseInt(process.env.HEALTH_HTTP_PORT || '0', 10) // 0 = disabled
   },
   
-  // Scheduled messaging
-  schedules: process.env.SCHEDULES ? JSON.parse(process.env.SCHEDULES) : [
-    // Example schedule - disabled by default
-    // {
-    //   id: 'hourly-person-1',
-    //   recipient: '1234567890@c.us',
-    //   message: 'Your hourly update message',
-    //   cron: '0 * * * *', // Every hour at minute 0
-    //   enabled: false,
-    //   timezone: 'America/New_York'
-    // }
-  ],
+  // Scheduled messaging - load from schedules.json file
+  schedules: (() => {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const schedulesFile = path.join(__dirname, 'schedules.json');
+      if (fs.existsSync(schedulesFile)) {
+        const data = fs.readFileSync(schedulesFile, 'utf8');
+        return JSON.parse(data);
+      }
+    } catch (error) {
+      console.error('Error loading schedules.json:', error.message);
+    }
+    // Fallback to env variable if file doesn't exist
+    return process.env.SCHEDULES ? JSON.parse(process.env.SCHEDULES) : [];
+  })(),
   
   // Browser/Puppeteer
   puppeteer: {

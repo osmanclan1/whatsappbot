@@ -38,7 +38,10 @@ class Scheduler {
    * @param {Object} schedule - Schedule configuration
    */
   addSchedule(schedule) {
-    if (!schedule.id || !schedule.recipient || !schedule.message || !schedule.cron) {
+    // Support both single recipient (string) or multiple recipients (array)
+    const hasRecipient = schedule.recipient || (schedule.recipients && schedule.recipients.length > 0);
+    
+    if (!schedule.id || !hasRecipient || !schedule.message || !schedule.cron) {
       logger.error('Invalid schedule configuration', { schedule });
       return;
     }
@@ -65,10 +68,14 @@ class Scheduler {
       ...options
     });
 
+    // Normalize recipients to array for logging
+    const recipients = schedule.recipients || [schedule.recipient];
+    
     this.jobs.set(schedule.id, { job, schedule });
     logger.schedule('Schedule added', {
       id: schedule.id,
-      recipient: schedule.recipient,
+      recipients: recipients,
+      recipientCount: recipients.length,
       cron: schedule.cron,
       timezone: schedule.timezone || 'system default'
     });
@@ -93,53 +100,74 @@ class Scheduler {
    * @param {Object} schedule - Schedule configuration
    */
   async executeSchedule(schedule) {
+    // Support both single recipient and multiple recipients
+    const recipients = schedule.recipients || [schedule.recipient];
+    
     logger.schedule('Executing scheduled message', {
       id: schedule.id,
-      recipient: schedule.recipient
+      recipientCount: recipients.length,
+      recipients: recipients
     });
 
-    try {
-      // Check rate limiter
-      const rateCheck = rateLimiter.canSend(schedule.recipient);
-      
-      if (!rateCheck.allowed) {
-        logger.warn('Scheduled message rate limited, will retry', {
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const recipient of recipients) {
+      try {
+        // Check rate limiter
+        const rateCheck = rateLimiter.canSend(recipient);
+        
+        if (!rateCheck.allowed) {
+          logger.warn('Scheduled message rate limited, will retry', {
+            id: schedule.id,
+            recipient: recipient,
+            reason: rateCheck.reason,
+            waitTime: rateCheck.waitTime
+          });
+
+          // Queue the message
+          await rateLimiter.queueMessage(
+            recipient,
+            schedule.message,
+            async () => {
+              await this.sendMessageFn(recipient, schedule.message);
+            }
+          );
+          failCount++;
+          continue;
+        }
+
+        // Send message
+        await this.sendMessageFn(recipient, schedule.message);
+        rateLimiter.recordSent(recipient);
+        successCount++;
+        
+        logger.schedule('Scheduled message sent successfully', {
           id: schedule.id,
-          recipient: schedule.recipient,
-          reason: rateCheck.reason,
-          waitTime: rateCheck.waitTime
+          recipient: recipient
         });
 
-        // Queue the message
-        await rateLimiter.queueMessage(
-          schedule.recipient,
-          schedule.message,
-          async () => {
-            await this.sendMessageFn(schedule.recipient, schedule.message);
-          }
-        );
-        return;
+        // Small delay between recipients to respect rate limits
+        if (recipients.indexOf(recipient) < recipients.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 3000)); // 3 second delay
+        }
+      } catch (error) {
+        failCount++;
+        logger.error('Failed to execute scheduled message', {
+          id: schedule.id,
+          recipient: recipient,
+          error: error.message,
+          stack: error.stack
+        });
       }
-
-      // Send message
-      await this.sendMessageFn(schedule.recipient, schedule.message);
-      rateLimiter.recordSent(schedule.recipient);
-      
-      logger.schedule('Scheduled message sent successfully', {
-        id: schedule.id,
-        recipient: schedule.recipient
-      });
-    } catch (error) {
-      logger.error('Failed to execute scheduled message', {
-        id: schedule.id,
-        recipient: schedule.recipient,
-        error: error.message,
-        stack: error.stack
-      });
-
-      // If client is disconnected, the message will be queued by rate limiter
-      // when connection is restored
     }
+
+    logger.schedule('Scheduled batch completed', {
+      id: schedule.id,
+      successCount: successCount,
+      failCount: failCount,
+      total: recipients.length
+    });
   }
 
   /**
